@@ -1,130 +1,150 @@
 #include <iostream>
 #include <vector>
+#include <queue>
 #include <thread>
-#include <chrono>
-#include <ctime>
 #include <mutex>
+#include <functional>
 #include <atomic>
 
-std::mutex mtx;
-std::mutex mtx2;
+static std::atomic_int counter{0};
+std::mutex mtx_cout;
 
-class CounterMutex {
-    private:
-        int count_;
-    public:
-        CounterMutex(): count_(-1) {
-        }
-
-        int get_value(){
-            std::lock_guard<std::mutex> lg(mtx);
-            return count_++;
-        }
-};
-
-class CounterAtomic {
-private:
-    std::atomic<int> count_;
-public:
-    CounterAtomic(): count_(-1) {
-    }
-
-    int get_value(){
-        return count_++;
-    }
-};
-
-class BigArray{
-    private:
-        size_t num_tasks_;
-    public:
-        int * array;
-        BigArray(size_t numTasks): num_tasks_(numTasks){
-            array = new int[numTasks]();
-            for (size_t i = 0; i < numTasks; ++i){
-                array[i] = 0;
-            }
-        }
-
-        std::string test_array() const{
-            std::cout<<std::endl;
-            for (size_t i = 0; i < num_tasks_; ++i) {
-                if (array[i] == 0) {
-                    return "test: not ok\n";
-                }
-            }
-            return "test: ok\n";
-        }
-
-        size_t size() const{
-            //std::lock_guard<std::mutex> lg(mtx);
-            return num_tasks_;
-        }
-        BigArray(BigArray &&) = default;
-        int& operator[] (std::size_t index);
-        ~BigArray(){
-            delete [] array;
-        }
-
-};
-
-int& BigArray::operator[] (std::size_t index)
+class queue
 {
-    //std::lock_guard<std::mutex> lg(mtx2);
-    return const_cast<int &>(array[index]);
-}
-
-template<typename T>
-void start_thread(T &c, BigArray &task1){
-
-    while(true){
-        int tmp = c.get_value();
-        if (tmp >= task1.size())
-            break;
-        std::this_thread::sleep_for(std::chrono::nanoseconds(10));
-        task1[tmp] = 1;
+private:
+    std::mutex mtx_q_;
+    std::queue<uint8_t> queue_{};
+public:
+    void push(uint8_t val){
+        std::lock_guard<std::mutex> lock(mtx_q_);
+        queue_.push(val);
     }
+    bool pop(uint8_t& val){
+        std::lock_guard<std::mutex> lock(mtx_q_);
+        if (queue_.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (queue_.empty())
+                return false;
+        }
+        val = queue_.front();
+        queue_.pop();
+        return true;
+    }
+};
 
-}
+class Producer{
+    private:
+        queue *q_ = nullptr;
+        std::thread *ptr_thr_ = nullptr;
+        uint tasks_;
+    public:
+        Producer(): tasks_(0){}
+        explicit Producer(uint tasksNum, queue *q): tasks_(tasksNum), q_(q){}
+        void start(std::function<void(Producer&)> func){
+            ptr_thr_ = new std::thread(func, std::ref(*this));
+        }
+        Producer(Producer && obj) noexcept : ptr_thr_(obj.ptr_thr_), tasks_(std::move(obj.tasks_)), q_(std::move(obj.q_)){
+        }
+        Producer & operator=(Producer && obj){
+            if (this == &obj) {
+                return *this;
+            }
+            ptr_thr_ = obj.ptr_thr_;
+            tasks_ = obj.tasks_;
+            q_ = obj.q_;
+            return *this;
+        }
+        void join(){
+            ptr_thr_->join();
+            while(tasks_!=0){}
+        }
+        uint get_tasks() const{
+            return tasks_;
+        }
+        void push_back(){
+            q_->push(1);
+            tasks_--;
+        }
+};
+
+class Consumer{
+private:
+    uint counter_;
+    queue *q_ = nullptr;
+    std::thread *ptr_thr_ = nullptr;
+public:
+    Consumer(): counter_(0) {}
+    explicit Consumer(queue *q): counter_(0), q_(q){}
+    void start(std::function<void(Consumer&, const uint*)> func, const uint *tasksNum){
+        ptr_thr_ = new std::thread(func, std::ref(*this), tasksNum);
+    }
+    Consumer(Consumer && obj) : ptr_thr_(obj.ptr_thr_), counter_(std::move(obj.counter_)), q_(std::move(obj.q_)){}
+    Consumer & operator=(Consumer && obj){
+        ptr_thr_ = obj.ptr_thr_;
+        counter_ = obj.counter_;
+        q_ = obj.q_;
+        return *this;
+    }
+    void join(){
+        ptr_thr_->join();
+    }
+    bool pop_front(uint8_t& val){
+        counter_++;
+        return q_->pop(val);
+    }
+};
+
+std::function<void(Producer&)> start_creating = ([](Producer &pr) {
+    auto start = std::chrono::high_resolution_clock::now(); //type?
+    while(pr.get_tasks() > 0){
+        pr.push_back();
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> delta_t = end - start;
+    std::lock_guard<std::mutex> lk(mtx_cout);
+    std::cout<<delta_t.count()<<" ms for producer\n";
+});
+
+std::function<void(Consumer&, const uint*)> start_receiving = ([](Consumer& con, const uint *tasksNum) {
+    auto start = std::chrono::high_resolution_clock::now();
+    while (true) {
+        uint8_t value = 0;
+        bool is_pop = con.pop_front(value);
+        if (is_pop) counter++;
+        if (!is_pop && counter == *tasksNum) {
+            auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> delta_t = end - start;
+            std::lock_guard<std::mutex> lk(mtx_cout);
+            std::cout<<delta_t.count()<<" ms for consumer\n";
+            return;
+        }
+    }
+});
 
 int main() {
-    //memset
-    std::vector<uint> nums_threads {4, 8, 16, 32}; //, 8, 16, 32
-    std::vector<std::thread> vec_threads;
-    constexpr const int num_tasks = 1024*1024;
-    std::cout<<"\nusing std::mutex: \n\n";
-    for(uint &num: nums_threads){
-        BigArray task1(num_tasks);
-        CounterMutex c;
-        std::cout<<"for NumThrears = "<<num<<std::endl;
-        unsigned int start_time =  clock();
-        for (uint i = 0; i < num; ++i) {
-            vec_threads.push_back(std::thread(start_thread<CounterMutex>, std::ref(c), std::ref(task1)));
+    std::vector<int> producerNum = {1, 2, 4}, consumerNum = {1, 2, 4};
+    queue q{};
+    constexpr uint taskNum = 4*1024*1024;
+    for (int prod = 0, con = 0; prod < producerNum.size() && con < consumerNum.size(); ++prod, ++con){
+        counter = 0;
+        std::vector<Producer> prods(producerNum[prod]);
+        std::vector<Consumer> cons(consumerNum[con]);
+        std::cout<<"Producers amount: "<<producerNum.at(prod)<<std::endl<<"Consumers amount: "<<consumerNum.at(con)<<std::endl;
+        for (Producer& pr: prods){
+            pr = Producer(taskNum/producerNum[prod], &q);
+            pr.start(start_creating);
         }
-
-        for (auto& thr: vec_threads){
-            thr.join();
+        for (Consumer& consumer: cons){
+            consumer = Consumer(&q);
+            consumer.start(start_receiving, &taskNum);
         }
-        std::cout<<"time: "<<clock() - start_time;
-        std::cout<<task1.test_array()<<std::endl;
-        vec_threads.clear();
-    }
-    std::cout<<"\nusing std::atomic: \n";
-    for(uint &num: nums_threads){
-        BigArray task1(num_tasks);
-        CounterAtomic c;
-        std::cout<<"for NumThrears = "<<num<<std::endl;
-
-        for (uint i = 0; i < num; ++i) {
-            vec_threads.push_back(std::thread(start_thread<CounterAtomic>, std::ref(c), std::ref(task1)));
+        for (Producer& pr: prods){
+            pr.join();
         }
-        unsigned int start_time =  clock();
-        for (auto& thr: vec_threads){
-            thr.join();
+        for (Consumer& consumer: cons){
+            consumer.join();
         }
-        std::cout<<"time: "<<clock() - start_time<<std::endl;
-        std::cout<<task1.test_array();
-        vec_threads.clear();
+        //while(counter!=taskNum){}
     }
     return 0;
 }
