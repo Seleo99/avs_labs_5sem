@@ -15,13 +15,14 @@ private:
     uint8_t *buffer_;
     uint8_t head_;
     uint8_t tail_;
-    int capacity_;
-    int count_;
+    uint8_t size_;
+    uint8_t count_; //num of elements
     std::condition_variable cv_not_full_;
-    std::condition_variable cv_empty; //if empty
+    std::condition_variable cv_empty_; //if empty
     std::mutex mtx_;
 public:
-    queue(int capacity): capacity_(capacity), head_(0), tail_(0), count_(0) {
+    std::atomic_int count_all_;
+    queue(uint capacity): size_(capacity), head_(0), tail_(0), count_(0), count_all_(0) {
         buffer_ = new uint8_t[capacity];
     }
     ~queue() {
@@ -29,12 +30,28 @@ public:
     }
 
     bool pop(uint8_t &value) {
-        std::unique_lock<std::mutex> u_lock(mtx_);
-        return true;
+        std::unique_lock<std::mutex> un_lock(mtx_);
+        if (cv_empty_.wait_for(un_lock,
+                               std::chrono::milliseconds(1),
+                               [this]() { return count_ != 0; }))
+        {
+            value = buffer_[head_];
+            head_ = (head_ + 1) % size_;
+            count_--;
+            cv_not_full_.notify_all();
+            return true;
+        }
+        return false;
     }
 
     void push(uint8_t value) {
         std::unique_lock<std::mutex> un_lock(mtx_);
+        cv_not_full_.wait(un_lock, [this](){return count_ < size_;});
+        buffer_[tail_] = value;
+        tail_ = (tail_ + 1) % size_;
+        count_++;
+        count_all_++;
+        cv_empty_.notify_all();
     }
 
 
@@ -44,7 +61,7 @@ class Producer{
 private:
     queue *q_ = nullptr;
     std::thread *ptr_thr_ = nullptr;
-    uint tasks_;
+    int tasks_;
 public:
     Producer(): tasks_(0){}
     explicit Producer(uint tasksNum, queue *q): tasks_(tasksNum), q_(q){}
@@ -78,9 +95,9 @@ public:
 class Consumer{
 private:
     uint counter_;
-    queue *q_ = nullptr;
     std::thread *ptr_thr_ = nullptr;
 public:
+    queue *q_ = nullptr;
     Consumer(): counter_(0) {}
     explicit Consumer(queue *q): counter_(0), q_(q){}
     void start(std::function<void(Consumer&, const uint*)> func, const uint *tasksNum){
@@ -93,9 +110,7 @@ public:
         q_ = obj.q_;
         return *this;
     }
-    void join(){
-        ptr_thr_->join();
-    }
+    void join(){ ptr_thr_->join(); }
     bool pop_front(uint8_t& val){
         counter_++;
         return q_->pop(val);
@@ -118,8 +133,7 @@ std::function<void(Consumer&, const uint*)> start_receiving = ([](Consumer& con,
     while (true) {
         uint8_t value = 0;
         bool is_pop = con.pop_front(value);
-        if (is_pop) counter++;
-        if (!is_pop && counter == *tasksNum) {
+        if (con.q_->count_all_ >= *tasksNum && !is_pop) {
             auto end = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double, std::milli> delta_t = end - start;
             std::lock_guard<std::mutex> lk(mtx_cout);
@@ -130,29 +144,31 @@ std::function<void(Consumer&, const uint*)> start_receiving = ([](Consumer& con,
 });
 
 int main() {
-    std::vector<int> producerNum = {1, 2, 4}, consumerNum = {1, 2, 4};
-    queue q{};
     constexpr uint taskNum = 4*1024*1024;
-    for (int prod = 0, con = 0; prod < producerNum.size() && con < consumerNum.size(); ++prod, ++con){
-        counter = 0;
-        std::vector<Producer> prods(producerNum[prod]);
-        std::vector<Consumer> cons(consumerNum[con]);
-        std::cout<<"Producers amount: "<<producerNum.at(prod)<<std::endl<<"Consumers amount: "<<consumerNum.at(con)<<std::endl;
-        for (Producer& pr: prods){
-            pr = Producer(taskNum/producerNum[prod], &q);
-            pr.start(start_creating);
+    std::vector<int> producerNum{1, 2, 4}, consumerNum{1, 2, 4};
+    std::vector<uint> vec_capacity {1, 4, 16};
+    for (uint& capacity: vec_capacity) {
+        std::cout<<"for capacity = "<<capacity<<std::endl;
+        for (int prod = 0, con = 0; prod < producerNum.size() && con < consumerNum.size(); ++prod, ++con) {
+            std::vector<Producer> prods(producerNum[prod]);
+            std::vector<Consumer> cons(consumerNum[con]);
+            queue q(capacity);
+            std::cout<<"Producers amount: "<<producerNum.at(prod)<<" Consumers amount: "<<consumerNum.at(con)<<std::endl;
+            for (Producer &pr: prods) {
+                pr = Producer(taskNum / producerNum[prod], &q);
+                pr.start(start_creating);
+            }
+            for (Consumer &consumer: cons) {
+                consumer = Consumer(&q);
+                consumer.start(start_receiving, &taskNum);
+            }
+            for (Producer &pr: prods) {
+                pr.join();
+            }
+            for (Consumer &consumer: cons) {
+                consumer.join();
+            }
         }
-        for (Consumer& consumer: cons){
-            consumer = Consumer(&q);
-            consumer.start(start_receiving, &taskNum);
-        }
-        for (Producer& pr: prods){
-            pr.join();
-        }
-        for (Consumer& consumer: cons){
-            consumer.join();
-        }
-        //while(counter!=taskNum){}
     }
     return 0;
 }
