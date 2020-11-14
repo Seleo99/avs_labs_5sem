@@ -7,6 +7,11 @@
 //вариант 12 - свертка двух последовательностей
 //Через преобразования Фурье можно за 3*n*logn + n накодить))))
 
+enum CalcType{
+    Standard,
+    Parallel
+};
+
 template<typename T>
 void print(std::vector<T> const &vc){
     std::cout.setf(std::ios::fixed);
@@ -27,30 +32,27 @@ std::vector<T> randomVector(size_t const &size){
 }
 
 template<typename T>
-const std::vector<T> convolution_omp(std::vector<T> const &seq1, const size_t &size_seq1,
-                                 std::vector<T> const &seq2, const size_t &size_seq2) {
+const std::vector<T> convolution(std::vector<T> const &seq1, const size_t &size_seq1,
+                                 std::vector<T> const &seq2, const size_t &size_seq2,
+                                 CalcType calc_type) {
     std::vector<T> result(size_seq1 + size_seq2 - 1, 0);
     alignas(16) size_t j = 0, i = 0;
-    #pragma omp parallel for private(j, i)
-    for (i = 0; i < result.size(); ++i) {
-        for (j = 0; j < seq2.size(); ++j) {
-            if (i - j < seq1.size()) {
-                result[i] += seq1[i - j] * seq2[j];
+    if (calc_type == CalcType::Parallel) {
+#pragma omp parallel for private(j, i)
+        for (i = 0; i < result.size(); ++i) {
+            for (j = 0; j < seq2.size(); ++j) {
+                if (i - j < seq1.size()) {
+                    result[i] += seq1[i - j] * seq2[j];
+                }
             }
         }
     }
-    return result;
-}
-
-template<typename T>
-const std::vector<T> convolution(std::vector<T> const &seq1, const size_t &size_seq1,
-                                 std::vector<T> const &seq2, const size_t &size_seq2) {
-    std::vector<T> result(size_seq1 + size_seq2 - 1, 0);
-    alignas(16) size_t j = 0, i = 0;
-    for (i = 0; i < result.size(); ++i) {
-        for (j = 0; j < seq2.size(); ++j) {
-            if (i - j < seq1.size()) {
-                result[i] += seq1[i - j] * seq2[j];
+    else{
+        for (i = 0; i < result.size(); ++i) {
+            for (j = 0; j < seq2.size(); ++j) {
+                if (i - j < seq1.size()) {
+                    result[i] += seq1[i - j] * seq2[j];
+                }
             }
         }
     }
@@ -73,30 +75,14 @@ int main() {
     print(seq2);
     double time_begin, time_end;
     time_begin = omp_get_wtime();
-    std::vector<double> res = convolution(seq1, size_seq1, seq2, size_seq2);
+    std::vector<double> res = convolution(seq1, size_seq1, seq2, size_seq2, CalcType::Standard);
     time_end = omp_get_wtime();
     std::cout<<"Time without omp: "<<time_end - time_begin<<std::endl;
     time_begin = omp_get_wtime();
-    res = convolution_omp(seq1, size_seq1, seq2, size_seq2);
+    res = convolution(seq1, size_seq1, seq2, size_seq2, CalcType::Parallel);
     time_end = omp_get_wtime();
     std::cout<<"Time parallel: "<<time_end - time_begin<<std::endl;
     std::cout<<"Resl: ";
     print(res);
     return 0;
 }
-
-//pragma openMP parallel for
-//для POSIX-систем:
-//Определено количество ядер
-//код под прагмой будет вынесен в отдельную функцию
-//создается столько posix-threads, сколько ядер на этой системе
-//каждому потоку на исполнение передастся сгенерированная функция
-//на месте } сгенерится join по всем потокам
-//каждому потоку передано то пространство итерирования, которое для него специфично
-
-//pragma omp for
-//pragma omp sections
-//pragma omp single
-
-//private
-//pragma omp task
