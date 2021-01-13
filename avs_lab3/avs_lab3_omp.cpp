@@ -4,9 +4,6 @@
 #include <random>
 #include <iomanip>
 
-//вариант 12 - свертка двух последовательностей
-//Через преобразования Фурье можно за 3*n*logn + n накодить))))
-
 enum CalcType{
     Standard,
     Parallel
